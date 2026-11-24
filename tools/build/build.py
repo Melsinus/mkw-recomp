@@ -125,7 +125,10 @@ LINUX = Target(
     "clang", "clang++", "llvm-ar", ROOT / "build/mkw",
     ["-D_GNU_SOURCE"],
     # -no-pie: the function tables (hundreds of thousands of pointers) need no load-time relocation.
-    ["-fuse-ld=lld", "-no-pie", "-Wl,-z,noexecstack", "-Wl,-Map=$builddir/mkw.map"],
+    # rpath $ORIGIN/lib: the AppImage's mkw finds the libraries bundled beside it (release.py) even when a launcher
+    # starts it without AppRun's LD_LIBRARY_PATH (libvpx.so.6 not found, exit 127); lld writes it as RUNPATH, so
+    # LD_LIBRARY_PATH still comes first. $$ is ninja's $, and the quotes keep the shell from expanding $ORIGIN.
+    ["-fuse-ld=lld", "-no-pie", "-Wl,-z,noexecstack", "-Wl,-Map=$builddir/mkw.map", "'-Wl,-rpath,$$ORIGIN/lib'"],
     ["-lvulkan", "-lSDL3", "-lopus", "-lvpx", "-lzstd", "-l:libstdc++.a", "-lm", "-lpthread", "-ldl"],
     ROOT / "scratchpad/vma",  # vk_mem_alloc.h 3.4.0 (AUR only on Arch); fetched as in tools/build/README.md
 )  # fmt: skip
