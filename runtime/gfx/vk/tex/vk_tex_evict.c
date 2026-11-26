@@ -82,6 +82,50 @@ int vk_texture_trim(uint64_t bytes) {
     return freed > 0 || dropped;
 }
 
+// ctl "purge" (fork vram-reset): every recreatable texture not looked up in the last PURGE_RECENT submits goes, and
+// every released entry, not only the idle ones vk_texture_trim takes. Between races the title and menu textures sit
+// in most of the texture pool's 256 MiB blocks, so a trim leaves 1-2 GiB of holes and no block VMA can give back: after
+// a 3-player session the driver still counted 6 791 MiB against a ~6 480 MiB budget and the menus ran at 28 fps
+// (Melsinus' logs, 26/11/2026). Purged, the textures still in use come back on their next lookup, uploaded again from
+// their storage into the first blocks, and the emptied blocks past the pool's minimum go back to the driver.
+// PURGE_RECENT keeps what the submissions being recorded or in flight name (destroy_idle defers the rest to the GPU).
+// The texture lock is taken, not tried: the ctl thread holds no upload lock (vk_texture_trim's reason to try).
+#define PURGE_RECENT 2
+int vk_texture_purge(uint64_t *freed_bytes) {
+    VkCtx *c = vk_ctx();
+    *freed_bytes = 0;
+    if (!c || !c->vma) return 0;
+    lock();
+    uint64_t freed = 0;
+    int out = 0;
+    while (rel_head) {
+        VmaAllocationInfo vi = {0};
+        if (rel_head->alloc) vmaGetAllocationInfo(c->vma, rel_head->alloc, &vi);
+        freed += vi.size, out++;
+        destroy_idle(rel_head);
+    }
+    Tex **cand = malloc(sizeof *cand * (size_t)(by_key.n + 1));
+    if (cand) {
+        int n = 0;
+        for (uint32_t i = 0; i < by_key.cap; i++) {
+            Tex *e = by_key.vals ? by_key.vals[i] : NULL;
+            if (e && e->alloc && e->pub.mirrored && !e->pub.gpu_owned && !e->gpu_dirty && !e->released &&
+                (uint32_t)(submit_epoch - e->seen) > PURGE_RECENT)
+                cand[n++] = e;
+        }
+        for (int i = 0; i < n; i++) {
+            VmaAllocationInfo vi = {0};
+            vmaGetAllocationInfo(c->vma, cand[i]->alloc, &vi);
+            freed += vi.size, out++, n_evicted++, evicted_bytes += vi.size;
+            destroy_idle(cand[i]);
+        }
+        free(cand);
+    }
+    unlock();
+    *freed_bytes = freed;
+    return out;
+}
+
 int owned_lower(uint64_t a) {
     int lo = 0, hi = nowned;
     while (lo < hi) {

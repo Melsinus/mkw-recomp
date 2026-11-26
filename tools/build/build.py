@@ -236,6 +236,8 @@ def module_glue(gen: Path, exefs: Path, library: bool) -> str:
 def port_version() -> str:
     """The release tag without its v (0.1.0) or, between tags, git describe's tag-commits-hash; the commit alone in a
     clone without tags, "dev" outside git (the source tarball of a release says nothing)."""
+    if os.environ.get("MKW_PORT_VERSION"):  # a fork's build that keeps a release's game files (the launcher's check)
+        return os.environ["MKW_PORT_VERSION"]
     r = subprocess.run(["git", "-C", str(ROOT), "describe", "--tags", "--always", "--dirty"],
                        capture_output=True, text=True, check=False)  # fmt: skip
     return r.stdout.strip().removeprefix("v") if r.returncode == 0 and r.stdout.strip() else "dev"

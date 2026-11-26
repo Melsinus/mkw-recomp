@@ -14,6 +14,8 @@
 //   threads              each guest thread's wait and guest return addresses (kernel_diag.c), for a hung run
 //   trim [MiB]           frees that much (1024) as an allocation failure would: released textures, idle mirrored ones
 //                        (vk_mem_relieve), with the vram line before and after
+//   purge                every recreatable texture not named by the last submissions, then as trim: the texture
+//                        pool's emptied blocks go back (fork vram-reset; the next frames upload what is still in use)
 //   heap                 the C heap (in use, free, mapped) and the process's resident memory, then the same after
 //                        plat_heap_trim: how much of the runtime's and the driver's malloc is free space kept
 //   vram                 the "mem: vram" line now: what holds device-local memory (vk_mem_log.c, MKW_VRAM_LOG)
@@ -113,6 +115,14 @@ void ctl_run(char *line) {
         vk_mem_relieve(mib << 20, "ctl trim");
         vram_log_now();
         rt_log("ctl: trim %llu MiB at frame %llu", (unsigned long long)mib, (unsigned long long)frame);
+    } else if (!strcmp(cmd, "purge")) {
+        uint64_t freed;
+        vram_log_now();
+        int n = vk_texture_purge(&freed);
+        vk_mem_relieve(64ull << 20, "ctl purge");   // what the purge deferred freed, the GPU waited for
+        vram_log_now();
+        rt_log("ctl: purge %d textures (%llu MiB) at frame %llu", n, (unsigned long long)(freed >> 20),
+               (unsigned long long)frame);
     } else if (!strcmp(cmd, "heap")) {
         for (int i = 0; i < 2; i++) {
             uint64_t use, fr, map, res, prv, t0 = plat_now_ns();
