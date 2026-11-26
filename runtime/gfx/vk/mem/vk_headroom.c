@@ -115,6 +115,15 @@ static void headroom_main(void *arg) {
     }
 }
 
+// ctl purge (fork vram-reset): the spare blocks held ahead go too; the thread makes new ones only with room again.
+void vk_headroom_drop(void) {
+    if (!H.started) return;
+    plat_mutex_lock(&H.lock);
+    const VkCtx *c = vk_ctx();
+    for (uint32_t t = 0; c && t < 64; t++) drop_anchor(c, t);
+    plat_mutex_unlock(&H.lock);
+}
+
 // Before the allocator is destroyed: waits for a running top-up, frees the anchors, and the thread allocates no more.
 void vk_headroom_stop(void) {
     if (!H.started) return;

@@ -82,48 +82,67 @@ int vk_texture_trim(uint64_t bytes) {
     return freed > 0 || dropped;
 }
 
-// ctl "purge" (fork vram-reset): every recreatable texture not looked up in the last PURGE_RECENT submits goes, and
-// every released entry, not only the idle ones vk_texture_trim takes. Between races the title and menu textures sit
-// in most of the texture pool's 256 MiB blocks, so a trim leaves 1-2 GiB of holes and no block VMA can give back: after
-// a 3-player session the driver still counted 6 791 MiB against a ~6 480 MiB budget and the menus ran at 28 fps
-// (Melsinus' logs, 26/11/2026). Purged, the textures still in use come back on their next lookup, uploaded again from
-// their storage into the first blocks, and the emptied blocks past the pool's minimum go back to the driver.
-// PURGE_RECENT keeps what the submissions being recorded or in flight name (destroy_idle defers the rest to the GPU).
-// The texture lock is taken, not tried: the ctl thread holds no upload lock (vk_texture_trim's reason to try).
-#define PURGE_RECENT 2
-int vk_texture_purge(uint64_t *freed_bytes) {
+// ctl "purge" (fork vram-reset): every recreatable texture goes, the ones on screen too, and every released entry. A
+// trim only takes what no submission named for EVICT_IDLE submits: between races the title and menu textures stay,
+// spread over most of the texture pool's 256 MiB blocks, so no block goes back (Melsinus' logs, 26/11/2026: 6 791 MiB
+// counted by the driver against a ~6 480 MiB budget after a trim, the menus at 28 fps). Purged, the textures still in
+// use are made and uploaded again from their storage on their next lookup (a freeze of a frame or a few), packed into
+// the first blocks, and the emptied ones go back: VMA deletes an empty block past the pool's minimum when the budget is
+// exceeded or another one is empty.
+// It runs on the replay thread at the start of a submission (vk_texture_new_submit, the texture lock held), so no
+// texture the submission being recorded names can go: every one this submission looks up afterwards is made anew.
+// The ones earlier submissions still use on the GPU are freed once it is idle (destroy_idle). GPU-written textures
+// (render targets, gpu_owned, gpu_dirty) have no storage to come back from and stay.
+static volatile int32_t purge_req, purge_done_n;
+static volatile uint64_t purge_done_bytes;
+
+void tex_purge_at_submit(void) {   // vk_texture_new_submit, the texture lock held
+    if (!__atomic_load_n(&purge_req, __ATOMIC_ACQUIRE)) return;
     VkCtx *c = vk_ctx();
-    *freed_bytes = 0;
-    if (!c || !c->vma) return 0;
-    lock();
     uint64_t freed = 0;
     int out = 0;
-    while (rel_head) {
-        VmaAllocationInfo vi = {0};
-        if (rel_head->alloc) vmaGetAllocationInfo(c->vma, rel_head->alloc, &vi);
-        freed += vi.size, out++;
-        destroy_idle(rel_head);
-    }
-    Tex **cand = malloc(sizeof *cand * (size_t)(by_key.n + 1));
-    if (cand) {
-        int n = 0;
-        for (uint32_t i = 0; i < by_key.cap; i++) {
-            Tex *e = by_key.vals ? by_key.vals[i] : NULL;
-            if (e && e->alloc && e->pub.mirrored && !e->pub.gpu_owned && !e->gpu_dirty && !e->released &&
-                (uint32_t)(submit_epoch - e->seen) > PURGE_RECENT)
-                cand[n++] = e;
-        }
-        for (int i = 0; i < n; i++) {
+    if (c && c->vma) {
+        while (rel_head) {
             VmaAllocationInfo vi = {0};
-            vmaGetAllocationInfo(c->vma, cand[i]->alloc, &vi);
-            freed += vi.size, out++, n_evicted++, evicted_bytes += vi.size;
-            destroy_idle(cand[i]);
+            if (rel_head->alloc) vmaGetAllocationInfo(c->vma, rel_head->alloc, &vi);
+            freed += vi.size, out++;
+            destroy_idle(rel_head);
         }
-        free(cand);
+        Tex **cand = malloc(sizeof *cand * (size_t)(by_key.n + 1));
+        if (cand) {
+            int n = 0;
+            for (uint32_t i = 0; i < by_key.cap; i++) {
+                Tex *e = by_key.vals ? by_key.vals[i] : NULL;
+                if (e && e->alloc && e->pub.mirrored && !e->pub.gpu_owned && !e->gpu_dirty && !e->released &&
+                    e->seen != submit_epoch)
+                    cand[n++] = e;
+            }
+            for (int i = 0; i < n; i++) {
+                VmaAllocationInfo vi = {0};
+                vmaGetAllocationInfo(c->vma, cand[i]->alloc, &vi);
+                freed += vi.size, out++, n_evicted++, evicted_bytes += vi.size;
+                destroy_idle(cand[i]);
+            }
+            free(cand);
+        }
     }
-    unlock();
-    *freed_bytes = freed;
-    return out;
+    __atomic_store_n(&purge_done_bytes, freed, __ATOMIC_RELAXED);
+    __atomic_store_n(&purge_done_n, out, __ATOMIC_RELAXED);
+    __atomic_store_n(&purge_req, 0, __ATOMIC_RELEASE);
+}
+
+// The ctl thread: asks for the purge at the next submission and waits for it (up to 3 s: a paused or loading game
+// sends none). -1 when no submission came.
+int vk_texture_purge(uint64_t *freed_bytes) {
+    *freed_bytes = 0;
+    __atomic_store_n(&purge_req, 1, __ATOMIC_RELEASE);
+    for (int i = 0; i < 600 && __atomic_load_n(&purge_req, __ATOMIC_ACQUIRE); i++) plat_sleep_ms(5);
+    if (__atomic_load_n(&purge_req, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&purge_req, 0, __ATOMIC_RELEASE);
+        return -1;
+    }
+    *freed_bytes = __atomic_load_n(&purge_done_bytes, __ATOMIC_RELAXED);
+    return __atomic_load_n(&purge_done_n, __ATOMIC_RELAXED);
 }
 
 int owned_lower(uint64_t a) {

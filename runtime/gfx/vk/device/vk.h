@@ -226,7 +226,7 @@ uint32_t vk_texture_reg_serial(void);
 extern uint32_t vk_tex_reg_limit;
 void vk_sampler_register(int id, const samp_par *s);                // sampler descriptor slot (copied)
 int  vk_texture_trim(uint64_t bytes);      // out of memory: released and idle mirrored textures go (vk_staging)
-int  vk_texture_purge(uint64_t *freed_bytes);  // ctl purge: every recreatable texture not in recent use goes
+int  vk_texture_purge(uint64_t *freed_bytes);  // ctl purge: every recreatable texture goes at the next submit (-1: none came)
 void vk_texture_release(const tex_t *t);   // TextureFinalize: the image stays for slots that still name its storage
 void vk_read_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint8_t *dst, uint64_t row, uint64_t img);
 void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, uint64_t row, uint64_t img);
@@ -365,6 +365,7 @@ void vk_tex_pool_stats(uint64_t *block_bytes, uint64_t *alloc_bytes);   // the p
 void vk_tex_pool_start(void);   // MKW_VK_TEX_POOL_MIN: texture memory made at start (vk_tex_image.c)
 void vk_tex_pool_stop(void);    // after image destruction, before destroying the VMA allocator
 void vk_headroom_stop(void);   // before vmaDestroyAllocator
+void vk_headroom_drop(void);   // ctl purge: the spare blocks held ahead are freed
 int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out);   // 1 when all of [addr, addr+size) is backed
 int vk_mem_virt_phys(uint64_t addr, uint64_t *phys);   // virtual pool page at addr: 1 and the GPU address it maps to
 
