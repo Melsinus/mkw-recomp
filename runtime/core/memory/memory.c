@@ -920,13 +920,13 @@ uint32_t mem_query(uint64_t a, RtMemoryInfo *out) {
 // GPU, and accepts a base's read-only page. Only the pages of the range are looked at: mem_query also measures the
 // whole run around a, which in the alias region means scanning its map. 0 means these books cannot vouch for the
 // range (the kernel region, a module, the host's memory, a trap): ask the platform there (plat_mem_readable).
-int mem_guest_readable(uint64_t a, uint64_t n) {
+static int guest_readable(uint64_t a, uint64_t n, int alias) {
     if (!n) n = 1;
     int ok = 0;
     plat_mutex_lock_shared(&lock);
     if (inside(a, n, (RtRange){L.heap.base, heap_size})) {
         ok = 1;
-    } else if (inside(a, n, L.alias)) {
+    } else if (alias && inside(a, n, L.alias)) {
         ok = 1;
         for (uint64_t p = (a - L.alias.base) / PAGE, e = (a + n - 1 - L.alias.base) / PAGE; ok && p <= e; p++)
             ok = alias_pages[p] != 0;
@@ -939,6 +939,12 @@ int mem_guest_readable(uint64_t a, uint64_t n) {
         ok = !__atomic_load_n(&trapped[p], __ATOMIC_RELAXED);
     return ok;
 }
+
+int mem_guest_readable(uint64_t a, uint64_t n) { return guest_readable(a, n, 1); }
+
+// The heap's part only: an alias page can be unmapped by the game while another thread reads it, a heap page cannot
+// (vk_tex_prefetch.c reads registered textures' storage unsynchronized with the game)
+int mem_guest_heap_readable(uint64_t a, uint64_t n) { return guest_readable(a, n, 0); }
 
 // ---- GetInfo memory ids
 int mem_info(uint32_t id, uint64_t *out) {

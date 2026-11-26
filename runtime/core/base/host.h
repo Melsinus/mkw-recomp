@@ -146,6 +146,7 @@ uint32_t mem_set_attribute(uint64_t a, uint64_t n, uint32_t mask, uint32_t at); 
 uint32_t mem_map(uint64_t dst, uint64_t src, uint64_t n);                       // 0x04
 uint32_t mem_unmap(uint64_t dst, uint64_t src, uint64_t n);                     // 0x05
 uint32_t mem_query(uint64_t a, RtMemoryInfo *out);                              // 0x06
+int mem_guest_heap_readable(uint64_t a, uint64_t n);       // as below, the game's heap only (no alias pages)
 int mem_guest_readable(uint64_t a, uint64_t n);            // 1: [a, a+n) is the game's heap or mapped alias pages,
                                                            // not a moved stack's source or a trapped page, which the
                                                            // runtime may read without a fault it cannot handle; from

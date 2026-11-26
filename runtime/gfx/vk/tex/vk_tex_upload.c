@@ -233,7 +233,14 @@ static void up_deswizzle(void *ctx, uint32_t i) {
     nvn_deswizzle_rows(J->d, q->level, q->layer, J->mem, q->dst, q->pitch, r0, r0 + q->band, NULL);
 }
 
+static void upload_(Tex *e);
 static void upload(Tex *e) {
+    uint64_t t0 = tt_begin();
+    upload_(e);
+    tt_end(TT_UPLOAD, t0);
+}
+
+static void upload_(Tex *e) {
     static volatile int32_t n_bad, n_undecoded;
     if (tracing(e->pub.addr))
         rt_log("vk: trace %#llx: upload %u of entry %p (%ux%u target %d), submit epoch %u", (unsigned long long)e->pub.addr,
@@ -269,7 +276,9 @@ static void upload(Tex *e) {
             decoded += texels * 4;
         }
     // In groups (up_group); MKW_ASTC=check in one.
+    uint64_t tf = tt_begin();
     vk_upload_flush_over(64ull << 20);   // as vk_tex_texel.c: the load of a capture sent its textures in one batch
+    tt_end(TT_FLUSH, tf);
     VkBuffer sb, rbuf = VK_NULL_HANDLE;
     VmaAllocation ralloc = NULL;
     uint8_t *stg, *raw_copy = NULL;
@@ -278,8 +287,24 @@ static void upload(Tex *e) {
     for (uint32_t g0 = 0, g1; g0 < n; g0 = g1) {
         VkDeviceSize gtotal;
         g1 = up_group(rg, g0, n, total, acheck, &gtotal);
+        tf = tt_begin();
         if (g0) vk_upload_flush_over(UP_FLUSH);
-        VkCommandBuffer cb = vk_upload_begin_staging(gtotal, &sb, (void **)&stg);
+        tt_end(TT_FLUSH, tf);
+        uint64_t ts = tt_begin();
+        // The prefetch thread stages on its own and takes the upload lock only to record: the replay's uploads and
+        // its submissions' flushes wait for that lock, and the deswizzle below would hold it (vk_tex_prefetch.c)
+        VkCommandBuffer cb = VK_NULL_HANDLE;
+        VmaAllocation salloc = NULL;
+        if (tex_pf_thread) {
+            if (!(stg = vk_staging_try(gtotal, &sb, &salloc))) {
+                tex_pf_failed = 1;
+                free(ar), free(rg);
+                return;
+            }
+        } else {
+            cb = vk_upload_begin_staging(gtotal, &sb, (void **)&stg);
+        }
+        tt_end(TT_STAGE, ts);
         UpPart *pt = calloc(g1 - g0, sizeof *pt);
         uint32_t items = 0;
         uint64_t raw_all = 0;
@@ -301,6 +326,7 @@ static void upload(Tex *e) {
         uint64_t dz0 = plat_now_ns();
         if (raw_all >= UP_PAR_MIN) tex_par_for(items, up_deswizzle, &job);
         else for (uint32_t i = 0; i < items; i++) up_deswizzle(&job, i);
+        if (tex_tt_on) tt_end(TT_DESW, dz0);
         if (vk_pool_diag_on()) {   // MKW_MEM_POOL_LABELS: read from a CPU_NO_ACCESS pool's game pages?
             const pool_t *p = nvn_pool_find(e->pub.addr, 1);
             if (p) vk_pool_diag_note(p->flags, 1, raw_all);
@@ -351,13 +377,19 @@ static void upload(Tex *e) {
             free(tmp);
         }
         free(pt);
+        if (tex_pf_thread) {   // its staging goes with the batch it is recorded in (the batch counts as its last user)
+            vmaFlushAllocation(vk_ctx()->vma, salloc, 0, VK_WHOLE_SIZE);
+            cb = vk_upload_begin();
+            vk_defer_buffer(sb, salloc);
+        }
         if (acheck && (raw_copy = malloc(gtotal))) memcpy(raw_copy, stg, gtotal);   // one group
         barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
         if (agpu) {
-            uint64_t a0 = perf_begin();
+            uint64_t a0 = perf_begin(), tq = tt_begin();
             checked = vk_astc_record(cb, sb, gtotal, ar + g0, (int)(g1 - g0), e->f.astc_bw, e->f.astc_bh,
                                      e->f.astc_srgb, e->pub.image, e->pub.aspect, e->f.astc_bc7, rbuf);
             perf_end(PERF_ASTC, a0);
+            tt_end(TT_ASTC, tq);
             if (!checked)
                 log_limited(&n_undecoded, "ASTC texture %#llx (fmt %#x %ux%u) not decoded on the GPU: left as it was",
                             (unsigned long long)e->pub.addr, d->format, d->width, d->height);
@@ -392,7 +424,7 @@ counted:;
                        (unsigned long long)e->pub.addr, d->format, d->width, d->height, t->L.size / 1024.0, dt / 1e6);
         }
     } else {
-        n_uploads++, perf_count(PERF_CNT_TEX_UP);
+        __atomic_add_fetch(&n_uploads, 1, __ATOMIC_RELAXED), perf_count(PERF_CNT_TEX_UP);   // the prefetch thread too
     }
     // MKW_TEX_UP_LOG=N (diagnosis): the first N uploads from frame MKW_TEX_UP_LOG_AT (2300) on, with how many submits
     // the game had made past the one being recorded: their storage is read now, from guest memory (Hookshot: MKW's
@@ -595,6 +627,8 @@ void make_fresh(Tex *e) {
     if (ch < 0 && e->t.mem && same_storage(e)) return;   // not tracked: the hash decides
     if (ch) upload(e);   // 1 written, -1 not tracked and rewritten: both upload again
 }
+
+void upload_first(Tex *e) { upload(e); }
 
 void upload_again(Tex *e) {
     if (e->pub.mirrored && !e->pub.gpu_owned) upload(e);

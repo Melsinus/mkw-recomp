@@ -411,12 +411,15 @@ int vk_fix_zero(void);
 VkCommandBuffer vk_upload_begin(void);
 void vk_upload_end(void);
 void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc);
+// A caller-owned staging buffer, or NULL with nothing trimmed, sent or waited for (vk_tex_prefetch.c: it can wait)
+void *vk_staging_try(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc);
 // Out of memory for what (a log name): textures trimmed, the open batch sent when no vk_upload_begin is open, the GPU
 // waited for and what it held freed; the caller tries once more
 void vk_mem_relieve(uint64_t bytes, const char *what);
 // vk_upload_begin plus vk_staging(size, buf, NULL) into *map, sending the open batch first when out of memory
 VkCommandBuffer vk_upload_begin_staging(VkDeviceSize size, VkBuffer *buf, void **map);
 uint64_t vk_upload_flush(int wait);
+int vk_upload_done(uint64_t seq);   // batch seq (vk_upload_flush's answer) is done on the GPU; no wait
 void vk_upload_flush_over(VkDeviceSize limit);   // sends the open batch once it holds that much staging or ASTC work
 void vk_upload_work(uint64_t texels);            // ASTC texels the open batch decodes (vk_upload_flush_over)
 // Deferred destruction: freed once the upload batches recorded so far and the timeline value last noted have completed.
@@ -596,6 +599,10 @@ void vk_texture_host_rewrote(uint64_t addr);   // textures at addr: the storage'
 void vk_texture_write_back(uint64_t addr, uint64_t size);   // writes those images back into their storage (waits)
 void vk_texture_range_gone(uint64_t lo, uint64_t size, VmaAllocation alloc);   // vk_pool_fini: drop the images there
 void vk_texture_stats(uint64_t *images, uint64_t *uploads, uint64_t *reuploads);
+void vk_tex_timing_frame(uint64_t frame);   // MKW_TEX_TIMING (vk_texture.c)
+void vk_tex_reg_note(int id);
+void vk_tex_prefetch_note(const tex_t *t);   // vk_tex_prefetch.c: the game registered t in a slot
+void vk_tex_prefetch_replay(void);           // mkw --replay: guest memory is the capture's, not the heap's
 // Entries now, live and released (TextureFinalize, kept until sweep_released), with the bytes of their own memory
 // (images not bound into pool memory).
 typedef struct {

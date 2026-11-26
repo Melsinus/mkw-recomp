@@ -657,6 +657,7 @@ static void replay_main(void *arg) {
             replay_core();
             vk_pstate_frame();
             uint64_t frame = __atomic_add_fetch(&gfx_counters.frames, 1, __ATOMIC_RELAXED);
+            vk_tex_timing_frame(frame);
             present_image(it.tex, it.has_crop ? it.crop : NULL, it.at, it.queued, frame, it.value);
             vk_tl_present(it.value, frame);
         }
@@ -871,6 +872,8 @@ static int reg_late(void) {
 }
 static void vk_be_texture_register(int id, const tex_t *t, const view_t *v) {
     vk_sync_start();
+    vk_tex_reg_note(id);
+    vk_tex_prefetch_note(t);   // made and uploaded ahead on its own thread (MKW_TEX_PREFETCH)
     if (!reg_queued()) {
         vk_texture_register(id, t, v);
         return;
