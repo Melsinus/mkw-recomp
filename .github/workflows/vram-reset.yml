@@ -1,0 +1,42 @@
+# Fork vram-reset: builds only mkw.exe for Windows (0.1.18 + the ctl "purge" command) and uploads it as an artifact.
+# The port version stays 0.1.18 (MKW_PORT_VERSION) so the launcher keeps the game files 0.1.18's setup made.
+name: vram-reset mkw.exe
+
+on:
+  push:
+    branches: [vram-reset]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    env:
+      MKW_PORT_VERSION: "0.1.18"
+    steps:
+      - name: Tools
+        run: pacman -Syu --noconfirm --needed git ninja cmake binutils uv python 7zip
+      - uses: actions/checkout@v4
+      - name: Git trusts the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: VMA header
+        run: |
+          mkdir -p scratchpad/vma
+          curl -sSfL -o scratchpad/vma/vk_mem_alloc.h https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/v3.4.0/include/vk_mem_alloc.h
+          echo "8487b7995ad3b263eb73bc5b9a77d71aa69b6bef5d58a715c02d2663afd81f1a  scratchpad/vma/vk_mem_alloc.h" | sha256sum -c -
+      - name: llvm-mingw and the Windows libraries
+        run: uv run tools/build/windeps.py
+      - name: mkw.exe
+        run: uv run tools/build/build.py --target windows --dist --runtime-only
+      - name: Where it is
+        run: ls -la build/dist/windows/ build/*.exe 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mkw-exe-vram-reset
+          path: |
+            build/dist/windows/mkw.exe
+          if-no-files-found: error
+          retention-days: 30
